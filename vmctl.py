@@ -183,7 +183,7 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
     vm_dir = project_root / "vms" / cfg.name
     display_args = ["-display", "none"] if cfg.display == "none" else ["-display", f"{cfg.display},show-cursor=on"]
     audio_args = (
-        ["-audiodev", f"{cfg.audio.backend},id=audio0", "-device", "intel-hda", "-device", "hda-duplex,audiodev=audio0"]
+        ["-audiodev", f"{cfg.audio.backend},id=audio0", "-device", "intel-hda", "-device", "hda-output,audiodev=audio0"]
         if cfg.audio.enabled
         else []
     )
@@ -194,7 +194,7 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
         "-cpu", "host",
         "-smp", str(cfg.cores),
         "-accel", cfg.accelerator,
-        "-M", "virt,highmem=off",
+        "-M", "virt,highmem=on",
         "-drive", f"if=pflash,format=raw,readonly=on,file={EFI_CODE_PATH}",
         "-drive", f"if=pflash,format=raw,file={vm_dir / 'firmware.fd'}",
         "-drive", f"file={project_root / cfg.disk},if=virtio",
@@ -211,6 +211,7 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
 
     cmd += [
         "-device", "virtio-gpu-pci",
+        "-device", "ramfb",
         *display_args,
         "-device", "qemu-xhci,id=usb",
         "-device", "usb-kbd",
