@@ -37,6 +37,7 @@ DEFAULT_ARCH = "aarch64"
 DEFAULT_ACCEL = "hvf"
 DEFAULT_SSH_PORT = 2222
 DEFAULT_DISPLAY = "default"
+DEFAULT_NETWORK = "vmnet-shared"
 
 FIRMWARE_SIZE = 64 * 1024 * 1024  # 64 MiB
 
@@ -50,7 +51,7 @@ err_console = Console(stderr=True)
 
 @dataclass
 class NetworkConfig:
-    type: str = "user"
+    type: str = DEFAULT_NETWORK
     ssh_port: int = DEFAULT_SSH_PORT
 
 
@@ -111,7 +112,7 @@ def _from_dict(data: dict) -> VMConfig:
         accelerator=data.get("accelerator", DEFAULT_ACCEL),
         display=data.get("display", DEFAULT_DISPLAY),
         network=NetworkConfig(
-            type=net.get("type", "user"),
+            type=net.get("type", DEFAULT_NETWORK),
             ssh_port=int(net.get("ssh_port", DEFAULT_SSH_PORT)),
         ),
         audio=AudioConfig(
@@ -209,6 +210,17 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
     else:
         cmd += ["-device", "virtio-scsi-pci"]
 
+    if cfg.network.type == "user":
+        network_args = [
+            "-netdev",
+            f"user,id=net0,hostfwd=tcp:127.0.0.1:{cfg.network.ssh_port}-:22",
+        ]
+    elif cfg.network.type == "vmnet-shared":
+        network_args = ["-netdev", "vmnet-shared,id=net0"]
+    else:
+        _error(f"Unsupported network type: {cfg.network.type}. Use 'user' or 'vmnet-shared'.")
+        raise typer.Exit(1)
+
     cmd += [
         "-device", "virtio-gpu-pci",
         "-device", "ramfb",
@@ -217,7 +229,7 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
         "-device", "usb-kbd",
         "-device", "usb-tablet",
         "-device", "virtio-net-pci,netdev=net0",
-        "-netdev", f"user,id=net0,hostfwd=tcp::{cfg.network.ssh_port}-:22",
+        *network_args,
         *audio_args,
     ]
     return cmd
@@ -293,6 +305,7 @@ def cmd_create(
     disk_size: Optional[str] = typer.Option(None, "--disk-size", help="Disk size (e.g. 20G)"),
     arch: Optional[str] = typer.Option(None, "--arch", help="QEMU architecture (aarch64)"),
     accel: Optional[str] = typer.Option(None, "--accel", help="Accelerator (hvf)"),
+    network: Optional[str] = typer.Option(None, "--network", help="Network: vmnet-shared | user"),
     ssh_port: Optional[int] = typer.Option(None, "--ssh-port", help="Host port forwarded to guest SSH (22)"),
     display: Optional[str] = typer.Option(None, "--display", help="Display backend: default | none"),
 ) -> None:
@@ -330,6 +343,11 @@ def cmd_create(
         arch = Prompt.ask("Architecture", default=DEFAULT_ARCH, console=console)
     if accel is None:
         accel = Prompt.ask("Accelerator", default=DEFAULT_ACCEL, console=console)
+    if network is None:
+        network = Prompt.ask("Network", default=DEFAULT_NETWORK, console=console)
+    if network not in {"user", "vmnet-shared"}:
+        _error("Network must be 'user' or 'vmnet-shared'.")
+        raise typer.Exit(1)
     if ssh_port is None:
         ssh_port = IntPrompt.ask("SSH port (host → guest:22)", default=DEFAULT_SSH_PORT, console=console)
     if display is None:
@@ -347,7 +365,7 @@ def cmd_create(
         installed=False,
         accelerator=accel,
         display=display,
-        network=NetworkConfig(type="user", ssh_port=ssh_port),
+        network=NetworkConfig(type=network, ssh_port=ssh_port),
         audio=AudioConfig(enabled=audio_enabled, backend="coreaudio"),
     )
 
