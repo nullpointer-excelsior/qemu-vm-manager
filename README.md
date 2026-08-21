@@ -36,6 +36,12 @@ vms/<name>/
 ejecutes con `python3 vmctl.py` a menos que ya tengas las dependencias instaladas en el
 entorno activo.
 
+**El script debe ejecutarse con permisos de root (`sudo`)**:
+
+```bash
+sudo ./vmctl.py <comando>
+```
+
 ### Crear una VM
 
 ```bash

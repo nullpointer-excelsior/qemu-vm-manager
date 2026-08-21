@@ -62,6 +62,12 @@ class AudioConfig:
 
 
 @dataclass
+class SharedFolder:
+    host_path: str
+    mount_tag: str
+
+
+@dataclass
 class VMConfig:
     name: str
     arch: str = DEFAULT_ARCH
@@ -73,8 +79,10 @@ class VMConfig:
     installed: bool = False
     accelerator: str = DEFAULT_ACCEL
     display: str = DEFAULT_DISPLAY
+    serial: str = ""
     network: NetworkConfig = field(default_factory=NetworkConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    shared_folders: list[SharedFolder] = field(default_factory=list)
 
 
 # ── Config serialization ──────────────────────────────────────────────────────
@@ -92,8 +100,12 @@ def _to_dict(cfg: VMConfig) -> dict:
         "installed": cfg.installed,
         "accelerator": cfg.accelerator,
         "display": cfg.display,
+        "serial": cfg.serial,
         "network": {"type": cfg.network.type, "ssh_port": cfg.network.ssh_port},
         "audio": {"enabled": cfg.audio.enabled, "backend": cfg.audio.backend},
+        "shared_folders": [
+            {"host_path": sf.host_path, "mount_tag": sf.mount_tag} for sf in cfg.shared_folders
+        ],
     }
 
 
@@ -111,6 +123,7 @@ def _from_dict(data: dict) -> VMConfig:
         installed=bool(data.get("installed", False)),
         accelerator=data.get("accelerator", DEFAULT_ACCEL),
         display=data.get("display", DEFAULT_DISPLAY),
+        serial=data.get("serial", ""),
         network=NetworkConfig(
             type=net.get("type", DEFAULT_NETWORK),
             ssh_port=int(net.get("ssh_port", DEFAULT_SSH_PORT)),
@@ -119,6 +132,10 @@ def _from_dict(data: dict) -> VMConfig:
             enabled=bool(audio.get("enabled", True)),
             backend=audio.get("backend", "coreaudio"),
         ),
+        shared_folders=[
+            SharedFolder(host_path=sf["host_path"], mount_tag=sf["mount_tag"])
+            for sf in data.get("shared_folders", [])
+        ],
     )
 
 
@@ -154,6 +171,21 @@ def _select_from_list(label: str, options: list[str]) -> str:
         console.print("[red]Invalid choice. Enter a number from the list.[/red]")
 
 
+def _detect_host_serial() -> Optional[str]:
+    """Read the host Mac's hardware serial number via ioreg."""
+    try:
+        result = subprocess.run(
+            ["ioreg", "-l"],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    for line in result.stdout.splitlines():
+        if "IOPlatformSerialNumber" in line:
+            return line.split("=", 1)[1].strip().strip('"')
+    return None
+
+
 def _print_summary(cfg: VMConfig) -> None:
     table = Table(title=f"VM: {cfg.name}", show_header=True, header_style="bold cyan")
     table.add_column("Field", style="bold")
@@ -168,8 +200,14 @@ def _print_summary(cfg: VMConfig) -> None:
     table.add_row("Installed", str(cfg.installed))
     table.add_row("Accelerator", cfg.accelerator)
     table.add_row("Display", cfg.display)
+    table.add_row("Serial", cfg.serial or "(none)")
     table.add_row("SSH Port", f"{cfg.network.ssh_port} → guest:22")
     table.add_row("Audio", f"{'enabled' if cfg.audio.enabled else 'disabled'} ({cfg.audio.backend})")
+    if cfg.shared_folders:
+        table.add_row(
+            "Shared Folders",
+            "\n".join(f"{sf.host_path} → tag:{sf.mount_tag}" for sf in cfg.shared_folders),
+        )
     console.print(table)
 
 
@@ -200,6 +238,15 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
         "-drive", f"if=pflash,format=raw,file={vm_dir / 'firmware.fd'}",
         "-drive", f"file={project_root / cfg.disk},if=virtio",
     ]
+
+    if cfg.serial:
+        cmd += ["-smbios", f"type=1,serial={cfg.serial}"]
+
+    for sf in cfg.shared_folders:
+        cmd += [
+            "-fsdev", f"local,id=fsdev-{sf.mount_tag},path={sf.host_path},security_model=mapped-xattr",
+            "-device", f"virtio-9p-pci,fsdev=fsdev-{sf.mount_tag},mount_tag={sf.mount_tag}",
+        ]
 
     if install_mode:
         cmd += [
@@ -308,6 +355,7 @@ def cmd_create(
     network: Optional[str] = typer.Option(None, "--network", help="Network: vmnet-shared | user"),
     ssh_port: Optional[int] = typer.Option(None, "--ssh-port", help="Host port forwarded to guest SSH (22)"),
     display: Optional[str] = typer.Option(None, "--display", help="Display backend: default | none"),
+    serial: Optional[str] = typer.Option(None, "--serial", help="SMBIOS serial number (use 'host' to match this Mac's serial)"),
 ) -> None:
     """Create a new VM: config, disk image, and EFI NVRAM."""
     project_root = Path.cwd()
@@ -354,6 +402,20 @@ def cmd_create(
         display = Prompt.ask("Display", default=DEFAULT_DISPLAY, console=console)
     audio_enabled = Confirm.ask("Enable audio?", default=True, console=console)
 
+    if serial is None:
+        host_serial = _detect_host_serial()
+        default_serial = host_serial or ""
+        serial = Prompt.ask(
+            "Serial number (empty to skip, 'host' to match this Mac)",
+            default=default_serial, console=console,
+        )
+    if serial is not None and serial.lower() == "host":
+        host_serial = _detect_host_serial()
+        if not host_serial:
+            _error("Could not detect host serial number via ioreg.")
+            raise typer.Exit(1)
+        serial = host_serial
+
     cfg = VMConfig(
         name=name,
         arch=arch,
@@ -365,6 +427,7 @@ def cmd_create(
         installed=False,
         accelerator=accel,
         display=display,
+        serial=serial or "",
         network=NetworkConfig(type=network, ssh_port=ssh_port),
         audio=AudioConfig(enabled=audio_enabled, backend="coreaudio"),
     )
@@ -427,6 +490,99 @@ def cmd_run(
         raise typer.Exit(1)
 
     _boot(cfg, project_root)
+
+
+# ── share ─────────────────────────────────────────────────────────────────────
+
+share_app = typer.Typer(help="Manage shared folders (virtio-9p) for a VM.")
+app.add_typer(share_app, name="share")
+
+
+def _resolve_vm_dir(name: Optional[str], project_root: Path) -> tuple[str, Path]:
+    vms_dir = project_root / "vms"
+    if name is None:
+        available = (
+            sorted(d.name for d in vms_dir.iterdir() if d.is_dir() and (d / "config.yaml").exists())
+            if vms_dir.exists()
+            else []
+        )
+        if not available:
+            console.print("[yellow]No VMs found in vms/. Create one with: vmctl create <name>[/yellow]")
+            raise typer.Exit(0)
+        name = _select_from_list("Select a VM", available)
+    vm_dir = vms_dir / name
+    if not (vm_dir / "config.yaml").exists():
+        _error(f"vms/{name}/config.yaml not found. Create it first with: vmctl create {name}")
+        raise typer.Exit(1)
+    return name, vm_dir
+
+
+@share_app.command("add")
+def cmd_share_add(
+    host_path: str = typer.Argument(..., help="Absolute path on the host to share"),
+    mount_tag: str = typer.Argument(..., help="Mount tag used in the guest (e.g. 'hostshare')"),
+    name: Optional[str] = typer.Option(None, "--vm", help="VM name (omit for interactive selection)"),
+) -> None:
+    """Add a shared folder (virtio-9p) to a VM's config."""
+    project_root = Path.cwd()
+    _, vm_dir = _resolve_vm_dir(name, project_root)
+    cfg = _load_config(vm_dir)
+
+    resolved_path = str(Path(host_path).expanduser().resolve())
+    if not Path(resolved_path).is_dir():
+        _error(f"Host path does not exist or is not a directory: {resolved_path}")
+        raise typer.Exit(1)
+    if any(sf.mount_tag == mount_tag for sf in cfg.shared_folders):
+        _error(f"Mount tag '{mount_tag}' already in use for this VM.")
+        raise typer.Exit(1)
+
+    cfg.shared_folders.append(SharedFolder(host_path=resolved_path, mount_tag=mount_tag))
+    _save_config(cfg, vm_dir)
+    console.print(f"[green]✓[/green] Shared folder added: {resolved_path} → tag:{mount_tag}")
+    console.print(
+        f"[dim]In the guest: sudo mount -t 9p -o trans=virtio,version=9p2000.L {mount_tag} /mnt/{mount_tag}[/dim]"
+    )
+
+
+@share_app.command("remove")
+def cmd_share_remove(
+    mount_tag: str = typer.Argument(..., help="Mount tag of the shared folder to remove"),
+    name: Optional[str] = typer.Option(None, "--vm", help="VM name (omit for interactive selection)"),
+) -> None:
+    """Remove a shared folder from a VM's config."""
+    project_root = Path.cwd()
+    _, vm_dir = _resolve_vm_dir(name, project_root)
+    cfg = _load_config(vm_dir)
+
+    remaining = [sf for sf in cfg.shared_folders if sf.mount_tag != mount_tag]
+    if len(remaining) == len(cfg.shared_folders):
+        _error(f"No shared folder found with mount tag '{mount_tag}'.")
+        raise typer.Exit(1)
+
+    cfg.shared_folders = remaining
+    _save_config(cfg, vm_dir)
+    console.print(f"[green]✓[/green] Shared folder removed: tag:{mount_tag}")
+
+
+@share_app.command("list")
+def cmd_share_list(
+    name: Optional[str] = typer.Option(None, "--vm", help="VM name (omit for interactive selection)"),
+) -> None:
+    """List shared folders configured for a VM."""
+    project_root = Path.cwd()
+    vm_name, vm_dir = _resolve_vm_dir(name, project_root)
+    cfg = _load_config(vm_dir)
+
+    if not cfg.shared_folders:
+        console.print(f"[yellow]No shared folders configured for '{vm_name}'.[/yellow]")
+        return
+
+    table = Table(title=f"Shared Folders: {vm_name}", show_header=True, header_style="bold cyan")
+    table.add_column("Host Path", style="bold")
+    table.add_column("Mount Tag")
+    for sf in cfg.shared_folders:
+        table.add_row(sf.host_path, sf.mount_tag)
+    console.print(table)
 
 
 if __name__ == "__main__":
