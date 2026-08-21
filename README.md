@@ -110,6 +110,28 @@ network:
   sudo ./vmctl.py run <nombre>
   ```
 
+## Troubleshooting
+
+### zsh se ve raro por SSH (caracteres duplicados, backspace no funciona)
+
+Si usas [Ghostty](https://ghostty.org) como terminal del host, este envía `TERM=xterm-ghostty`,
+un terminfo que la mayoría de VMs no tienen instalado. Esto provoca que zsh/oh-my-zsh
+redibuje mal la línea (caracteres duplicados/desordenados) y que teclas como Backspace
+se interpreten incorrectamente.
+
+Solución rápida: forzar un `TERM` estándar solo para la sesión SSH.
+
+```bash
+TERM=xterm-256color ssh usuario@<IP_DE_LA_VM>
+```
+
+Alternativa (instala el terminfo real de Ghostty en la VM, evita tener que setear `TERM`
+cada vez):
+
+```bash
+infocmp -x xterm-ghostty | ssh usuario@<IP_DE_LA_VM> -- tic -x -o \$HOME/.terminfo /dev/stdin
+```
+
 ## Scripts legacy
 
 `install-iso.sh`, `run-debian.sh` e `install-debian-base.sh` son anteriores a
