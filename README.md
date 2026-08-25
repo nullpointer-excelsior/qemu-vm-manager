@@ -110,6 +110,22 @@ network:
   sudo ./vmctl.py run <nombre>
   ```
 
+## Instalar el servicio de carpetas compartidas
+
+El instalador requiere `sshpass` y acceso SSH con un usuario que pueda ejecutar `sudo`:
+
+```bash
+brew install hudochenkov/sshpass/sshpass
+./scripts/install-mount-shared-service.sh -i <IP_O_HOST_DE_LA_VM> -p <PUERTO_SSH> -c <USUARIO>:<CONTRASEÑA>
+```
+
+El host (`-i`) es obligatorio. Para una VM con red `vmnet-shared`, usa su IP y el puerto
+22; no uses `localhost`, porque apunta al Mac:
+
+```bash
+./scripts/install-mount-shared-service.sh -i 192.168.64.2 -p 22 -c debian:debian
+```
+
 ## Troubleshooting
 
 ### zsh se ve raro por SSH (caracteres duplicados, backspace no funciona)
