@@ -21,3 +21,6 @@ sudo apt install -y ffmpeg
 sudo apt install -y htop
 
 sudo apt install -y jq
+
+sudo apt install -y yq
+

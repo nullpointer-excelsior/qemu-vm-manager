@@ -1,0 +1,11 @@
+[Unit]
+Description=Mount dynamic Virtio 9p shared folders
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mount-shared.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
