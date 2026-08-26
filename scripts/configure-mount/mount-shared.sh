@@ -36,6 +36,8 @@ for device in "${devices[@]}"; do
 
     if mount -t 9p -o "$MOUNT_OPTIONS" "$tag" "$mount_point"; then
         printf 'Mounted %s at %s\n' "$tag" "$mount_point"
+        chmod -R a+rwX "$mount_point"
+        printf 'Mounted %s at %s with read/write/execute permissions\n' "$tag" "$mount_point"
     else
         printf 'Failed to mount %s\n' "$tag" >&2
     fi
