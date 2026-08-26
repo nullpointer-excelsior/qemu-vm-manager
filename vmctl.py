@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,9 +35,8 @@ EFI_CODE_PATH = Path(
 DEFAULT_RAM = "2G"
 DEFAULT_CORES = 4
 DEFAULT_DISK_SIZE = "20G"
-DEFAULT_SSH_PORT = 2222
 DEFAULT_DISPLAY = "default"
-DEFAULT_NETWORK = "vmnet-shared"
+DEFAULT_NETWORK = "nat"
 
 FIRMWARE_SIZE = 64 * 1024 * 1024  # 64 MiB
 
@@ -76,7 +76,6 @@ err_console = Console(stderr=True)
 @dataclass
 class NetworkConfig:
     type: str = DEFAULT_NETWORK
-    ssh_port: int = DEFAULT_SSH_PORT
 
 
 @dataclass
@@ -121,7 +120,7 @@ def _to_dict(cfg: VMConfig) -> dict:
         "installed": cfg.installed,
         "display": cfg.display,
         "serial": cfg.serial,
-        "network": {"type": cfg.network.type, "ssh_port": cfg.network.ssh_port},
+        "network": {"type": cfg.network.type},
         "audio": {"enabled": cfg.audio.enabled, "backend": cfg.audio.backend},
         "shared_folders": [
             {"host_path": sf.host_path, "mount_tag": sf.mount_tag} for sf in cfg.shared_folders
@@ -144,7 +143,6 @@ def _from_dict(data: dict) -> VMConfig:
         serial=data.get("serial", ""),
         network=NetworkConfig(
             type=net.get("type", DEFAULT_NETWORK),
-            ssh_port=int(net.get("ssh_port", DEFAULT_SSH_PORT)),
         ),
         audio=AudioConfig(
             enabled=bool(audio.get("enabled", True)),
@@ -169,6 +167,25 @@ def _save_config(cfg: VMConfig, vm_dir: Path) -> None:
     vm_dir.mkdir(parents=True, exist_ok=True)
     with (vm_dir / "config.yaml").open("w") as fh:
         yaml.dump(_to_dict(cfg), fh, default_flow_style=False, sort_keys=False)
+
+
+def _load_template_options(project_root: Path) -> dict[str, str]:
+    config_path = project_root / ".vmctl" / "config.yml"
+    if not config_path.exists():
+        raise FileNotFoundError(str(config_path))
+    with config_path.open() as fh:
+        data = yaml.safe_load(fh) or {}
+
+    network_options = data.get("template-options", {}).get("network", [])
+    options: dict[str, str] = {}
+    for option in network_options:
+        if not isinstance(option, dict) or len(option) != 1:
+            raise ValueError("Each network template option must contain one name and command")
+        name, command = next(iter(option.items()))
+        if not isinstance(command, str):
+            raise ValueError(f"Network template option '{name}' must be a string")
+        options[name] = command
+    return options
 
 
 # ── TUI helpers ───────────────────────────────────────────────────────────────
@@ -217,7 +234,7 @@ def _print_summary(cfg: VMConfig) -> None:
     table.add_row("Installed", str(cfg.installed))
     table.add_row("Display", cfg.display)
     table.add_row("Serial", cfg.serial or "(none)")
-    table.add_row("SSH Port", f"{cfg.network.ssh_port} → guest:22")
+    table.add_row("Network", cfg.network.type)
     table.add_row("Audio", f"{'enabled' if cfg.audio.enabled else 'disabled'} ({cfg.audio.backend})")
     if cfg.shared_folders:
         table.add_row(
@@ -234,7 +251,7 @@ def _error(msg: str) -> None:
 # ── QEMU command builder ──────────────────────────────────────────────────────
 
 
-def _build_qemu_cmd(cfg: VMConfig, project_root: Path, architecture: str, accelerator: str, *, install_mode: bool) -> list[str]:
+def _build_qemu_cmd(cfg: VMConfig, project_root: Path, architecture: str, accelerator: str, network_options: dict[str, str], *, install_mode: bool) -> list[str]:
     vm_dir = project_root / "vms" / cfg.name
     display_args = ["-display", "none"] if cfg.display == "none" else ["-display", f"{cfg.display},show-cursor=on"]
     audio_args = (
@@ -273,16 +290,12 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, architecture: str, accele
     else:
         cmd += ["-device", "virtio-scsi-pci"]
 
-    if cfg.network.type == "user":
-        network_args = [
-            "-netdev",
-            f"user,id=net0,hostfwd=tcp:127.0.0.1:{cfg.network.ssh_port}-:22",
-        ]
-    elif cfg.network.type == "vmnet-shared":
-        network_args = ["-netdev", "vmnet-shared,id=net0"]
-    else:
-        _error(f"Unsupported network type: {cfg.network.type}. Use 'user' or 'vmnet-shared'.")
+    network_command = network_options.get(cfg.network.type)
+    if network_command is None:
+        supported_types = ", ".join(sorted(network_options))
+        _error(f"Unsupported network type: {cfg.network.type}. Use: {supported_types}.")
         raise typer.Exit(1)
+    network_args = shlex.split(network_command)
 
     cmd += [
         "-device", "virtio-gpu-pci",
@@ -291,7 +304,6 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, architecture: str, accele
         "-device", "qemu-xhci,id=usb",
         "-device", "usb-kbd",
         "-device", "usb-tablet",
-        "-device", "virtio-net-pci,netdev=net0",
         *network_args,
         *audio_args,
     ]
@@ -326,7 +338,12 @@ def _boot(cfg: VMConfig, project_root: Path) -> None:
     else:
         console.print("\n[bold green]Run mode[/bold green] — booting installed system")
 
-    cmd = _build_qemu_cmd(cfg, project_root, architecture, accelerator, install_mode=install_mode)
+    try:
+        network_options = _load_template_options(project_root)
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        _error(f"Failed to read .vmctl/config.yml: {exc}")
+        raise typer.Exit(1)
+    cmd = _build_qemu_cmd(cfg, project_root, architecture, accelerator, network_options, install_mode=install_mode)
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]\n")
     subprocess.run(cmd)
 
@@ -372,8 +389,7 @@ def cmd_create(
     ram: Optional[str] = typer.Option(None, "--ram", help="RAM amount (e.g. 2G)"),
     cores: Optional[int] = typer.Option(None, "--cores", help="Number of CPU cores"),
     disk_size: Optional[str] = typer.Option(None, "--disk-size", help="Disk size (e.g. 20G)"),
-    network: Optional[str] = typer.Option(None, "--network", help="Network: vmnet-shared | user"),
-    ssh_port: Optional[int] = typer.Option(None, "--ssh-port", help="Host port forwarded to guest SSH (22)"),
+    network: Optional[str] = typer.Option(None, "--network", help="Network type from .vmctl/config.yml (nat | bridge)"),
     display: Optional[str] = typer.Option(None, "--display", help="Display backend: default | none"),
     serial: Optional[str] = typer.Option(None, "--serial", help="SMBIOS serial number (use 'host' to match this Mac's serial)"),
 ) -> None:
@@ -407,13 +423,16 @@ def cmd_create(
         cores = IntPrompt.ask("CPU cores", default=DEFAULT_CORES, console=console)
     if disk_size is None:
         disk_size = Prompt.ask("Disk size", default=DEFAULT_DISK_SIZE, console=console)
+    try:
+        network_options = _load_template_options(project_root)
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        _error(f"Failed to read .vmctl/config.yml: {exc}")
+        raise typer.Exit(1)
     if network is None:
         network = Prompt.ask("Network", default=DEFAULT_NETWORK, console=console)
-    if network not in {"user", "vmnet-shared"}:
-        _error("Network must be 'user' or 'vmnet-shared'.")
+    if network not in network_options:
+        _error(f"Unsupported network type: {network}. Use: {', '.join(sorted(network_options))}.")
         raise typer.Exit(1)
-    if ssh_port is None:
-        ssh_port = IntPrompt.ask("SSH port (host → guest:22)", default=DEFAULT_SSH_PORT, console=console)
     if display is None:
         display = Prompt.ask("Display", default=DEFAULT_DISPLAY, console=console)
     audio_enabled = Confirm.ask("Enable audio?", default=True, console=console)
@@ -442,7 +461,7 @@ def cmd_create(
         installed=False,
         display=display,
         serial=serial or "",
-        network=NetworkConfig(type=network, ssh_port=ssh_port),
+        network=NetworkConfig(type=network),
         audio=AudioConfig(enabled=audio_enabled, backend="coreaudio"),
     )
 

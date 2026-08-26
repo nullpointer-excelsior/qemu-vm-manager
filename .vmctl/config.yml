@@ -1,0 +1,4 @@
+template-options:
+  network:
+    - bridge: "-netdev vmnet-bridged,id=net0,ifname=en0 -device virtio-net-pci,netdev=net0"
+    - nat: "-netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=net0"
