@@ -34,7 +34,6 @@ EFI_CODE_PATH = Path(
 DEFAULT_RAM = "2G"
 DEFAULT_CORES = 4
 DEFAULT_DISK_SIZE = "20G"
-DEFAULT_ARCH = "aarch64"
 DEFAULT_SSH_PORT = 2222
 DEFAULT_DISPLAY = "default"
 DEFAULT_NETWORK = "vmnet-shared"
@@ -52,6 +51,19 @@ def _detect_accelerator() -> str:
         return accelerators[platform.system()]
     except KeyError:
         raise RuntimeError(f"Unsupported host operating system: {platform.system()}")
+
+
+def _detect_architecture() -> str:
+    architectures = {
+        "aarch64": "aarch64",
+        "arm64": "aarch64",
+        "x86_64": "x86_64",
+        "AMD64": "x86_64",
+    }
+    try:
+        return architectures[platform.machine()]
+    except KeyError:
+        raise RuntimeError(f"Unsupported host architecture: {platform.machine()}")
 
 # ── Console ────────────────────────────────────────────────────────────────────
 
@@ -82,7 +94,6 @@ class SharedFolder:
 @dataclass
 class VMConfig:
     name: str
-    arch: str = DEFAULT_ARCH
     ram: str = DEFAULT_RAM
     cores: int = DEFAULT_CORES
     disk_size: str = DEFAULT_DISK_SIZE
@@ -102,7 +113,6 @@ class VMConfig:
 def _to_dict(cfg: VMConfig) -> dict:
     return {
         "name": cfg.name,
-        "arch": cfg.arch,
         "ram": cfg.ram,
         "cores": cfg.cores,
         "disk_size": cfg.disk_size,
@@ -124,7 +134,6 @@ def _from_dict(data: dict) -> VMConfig:
     audio = data.get("audio", {})
     return VMConfig(
         name=data["name"],
-        arch=data.get("arch", DEFAULT_ARCH),
         ram=data.get("ram", DEFAULT_RAM),
         cores=int(data.get("cores", DEFAULT_CORES)),
         disk_size=data.get("disk_size", DEFAULT_DISK_SIZE),
@@ -200,7 +209,6 @@ def _print_summary(cfg: VMConfig) -> None:
     table.add_column("Field", style="bold")
     table.add_column("Value")
     table.add_row("Name", cfg.name)
-    table.add_row("Architecture", cfg.arch)
     table.add_row("RAM", cfg.ram)
     table.add_row("Cores", str(cfg.cores))
     table.add_row("Disk Size", cfg.disk_size)
@@ -226,7 +234,7 @@ def _error(msg: str) -> None:
 # ── QEMU command builder ──────────────────────────────────────────────────────
 
 
-def _build_qemu_cmd(cfg: VMConfig, project_root: Path, accelerator: str, *, install_mode: bool) -> list[str]:
+def _build_qemu_cmd(cfg: VMConfig, project_root: Path, architecture: str, accelerator: str, *, install_mode: bool) -> list[str]:
     vm_dir = project_root / "vms" / cfg.name
     display_args = ["-display", "none"] if cfg.display == "none" else ["-display", f"{cfg.display},show-cursor=on"]
     audio_args = (
@@ -236,7 +244,7 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, accelerator: str, *, inst
     )
 
     cmd = [
-        f"qemu-system-{cfg.arch}",
+        f"qemu-system-{architecture}",
         "-m", cfg.ram,
         "-cpu", "host",
         "-smp", str(cfg.cores),
@@ -295,6 +303,7 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, accelerator: str, *, inst
 
 def _boot(cfg: VMConfig, project_root: Path) -> None:
     try:
+        architecture = _detect_architecture()
         accelerator = _detect_accelerator()
     except RuntimeError as exc:
         _error(str(exc))
@@ -317,7 +326,7 @@ def _boot(cfg: VMConfig, project_root: Path) -> None:
     else:
         console.print("\n[bold green]Run mode[/bold green] — booting installed system")
 
-    cmd = _build_qemu_cmd(cfg, project_root, accelerator, install_mode=install_mode)
+    cmd = _build_qemu_cmd(cfg, project_root, architecture, accelerator, install_mode=install_mode)
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]\n")
     subprocess.run(cmd)
 
@@ -363,7 +372,6 @@ def cmd_create(
     ram: Optional[str] = typer.Option(None, "--ram", help="RAM amount (e.g. 2G)"),
     cores: Optional[int] = typer.Option(None, "--cores", help="Number of CPU cores"),
     disk_size: Optional[str] = typer.Option(None, "--disk-size", help="Disk size (e.g. 20G)"),
-    arch: Optional[str] = typer.Option(None, "--arch", help="QEMU architecture (aarch64)"),
     network: Optional[str] = typer.Option(None, "--network", help="Network: vmnet-shared | user"),
     ssh_port: Optional[int] = typer.Option(None, "--ssh-port", help="Host port forwarded to guest SSH (22)"),
     display: Optional[str] = typer.Option(None, "--display", help="Display backend: default | none"),
@@ -399,8 +407,6 @@ def cmd_create(
         cores = IntPrompt.ask("CPU cores", default=DEFAULT_CORES, console=console)
     if disk_size is None:
         disk_size = Prompt.ask("Disk size", default=DEFAULT_DISK_SIZE, console=console)
-    if arch is None:
-        arch = Prompt.ask("Architecture", default=DEFAULT_ARCH, console=console)
     if network is None:
         network = Prompt.ask("Network", default=DEFAULT_NETWORK, console=console)
     if network not in {"user", "vmnet-shared"}:
@@ -428,7 +434,6 @@ def cmd_create(
 
     cfg = VMConfig(
         name=name,
-        arch=arch,
         ram=ram,
         cores=cores,
         disk_size=disk_size,
