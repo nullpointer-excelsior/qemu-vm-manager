@@ -7,10 +7,11 @@
 #   "pyyaml>=6.0",
 # ]
 # ///
-"""vmctl — QEMU Virtual Machine Manager for Apple Silicon Macs."""
+"""vmctl — QEMU Virtual Machine Manager."""
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,12 +35,23 @@ DEFAULT_RAM = "2G"
 DEFAULT_CORES = 4
 DEFAULT_DISK_SIZE = "20G"
 DEFAULT_ARCH = "aarch64"
-DEFAULT_ACCEL = "hvf"
 DEFAULT_SSH_PORT = 2222
 DEFAULT_DISPLAY = "default"
 DEFAULT_NETWORK = "vmnet-shared"
 
 FIRMWARE_SIZE = 64 * 1024 * 1024  # 64 MiB
+
+
+def _detect_accelerator() -> str:
+    accelerators = {
+        "Darwin": "hvf",
+        "Linux": "kvm",
+        "Windows": "whpx",
+    }
+    try:
+        return accelerators[platform.system()]
+    except KeyError:
+        raise RuntimeError(f"Unsupported host operating system: {platform.system()}")
 
 # ── Console ────────────────────────────────────────────────────────────────────
 
@@ -77,7 +89,6 @@ class VMConfig:
     disk: str = ""
     iso: str = ""
     installed: bool = False
-    accelerator: str = DEFAULT_ACCEL
     display: str = DEFAULT_DISPLAY
     serial: str = ""
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -98,7 +109,6 @@ def _to_dict(cfg: VMConfig) -> dict:
         "disk": cfg.disk,
         "iso": cfg.iso,
         "installed": cfg.installed,
-        "accelerator": cfg.accelerator,
         "display": cfg.display,
         "serial": cfg.serial,
         "network": {"type": cfg.network.type, "ssh_port": cfg.network.ssh_port},
@@ -121,7 +131,6 @@ def _from_dict(data: dict) -> VMConfig:
         disk=data.get("disk", ""),
         iso=data.get("iso", ""),
         installed=bool(data.get("installed", False)),
-        accelerator=data.get("accelerator", DEFAULT_ACCEL),
         display=data.get("display", DEFAULT_DISPLAY),
         serial=data.get("serial", ""),
         network=NetworkConfig(
@@ -198,7 +207,6 @@ def _print_summary(cfg: VMConfig) -> None:
     table.add_row("Disk", cfg.disk)
     table.add_row("ISO", cfg.iso or "(none)")
     table.add_row("Installed", str(cfg.installed))
-    table.add_row("Accelerator", cfg.accelerator)
     table.add_row("Display", cfg.display)
     table.add_row("Serial", cfg.serial or "(none)")
     table.add_row("SSH Port", f"{cfg.network.ssh_port} → guest:22")
@@ -218,7 +226,7 @@ def _error(msg: str) -> None:
 # ── QEMU command builder ──────────────────────────────────────────────────────
 
 
-def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) -> list[str]:
+def _build_qemu_cmd(cfg: VMConfig, project_root: Path, accelerator: str, *, install_mode: bool) -> list[str]:
     vm_dir = project_root / "vms" / cfg.name
     display_args = ["-display", "none"] if cfg.display == "none" else ["-display", f"{cfg.display},show-cursor=on"]
     audio_args = (
@@ -232,7 +240,7 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
         "-m", cfg.ram,
         "-cpu", "host",
         "-smp", str(cfg.cores),
-        "-accel", cfg.accelerator,
+        "-accel", accelerator,
         "-M", "virt,highmem=on",
         "-drive", f"if=pflash,format=raw,readonly=on,file={EFI_CODE_PATH}",
         "-drive", f"if=pflash,format=raw,file={vm_dir / 'firmware.fd'}",
@@ -286,6 +294,11 @@ def _build_qemu_cmd(cfg: VMConfig, project_root: Path, *, install_mode: bool) ->
 
 
 def _boot(cfg: VMConfig, project_root: Path) -> None:
+    try:
+        accelerator = _detect_accelerator()
+    except RuntimeError as exc:
+        _error(str(exc))
+        raise typer.Exit(1)
     _print_summary(cfg)
     install_mode = not cfg.installed
 
@@ -304,7 +317,7 @@ def _boot(cfg: VMConfig, project_root: Path) -> None:
     else:
         console.print("\n[bold green]Run mode[/bold green] — booting installed system")
 
-    cmd = _build_qemu_cmd(cfg, project_root, install_mode=install_mode)
+    cmd = _build_qemu_cmd(cfg, project_root, accelerator, install_mode=install_mode)
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]\n")
     subprocess.run(cmd)
 
@@ -351,7 +364,6 @@ def cmd_create(
     cores: Optional[int] = typer.Option(None, "--cores", help="Number of CPU cores"),
     disk_size: Optional[str] = typer.Option(None, "--disk-size", help="Disk size (e.g. 20G)"),
     arch: Optional[str] = typer.Option(None, "--arch", help="QEMU architecture (aarch64)"),
-    accel: Optional[str] = typer.Option(None, "--accel", help="Accelerator (hvf)"),
     network: Optional[str] = typer.Option(None, "--network", help="Network: vmnet-shared | user"),
     ssh_port: Optional[int] = typer.Option(None, "--ssh-port", help="Host port forwarded to guest SSH (22)"),
     display: Optional[str] = typer.Option(None, "--display", help="Display backend: default | none"),
@@ -389,8 +401,6 @@ def cmd_create(
         disk_size = Prompt.ask("Disk size", default=DEFAULT_DISK_SIZE, console=console)
     if arch is None:
         arch = Prompt.ask("Architecture", default=DEFAULT_ARCH, console=console)
-    if accel is None:
-        accel = Prompt.ask("Accelerator", default=DEFAULT_ACCEL, console=console)
     if network is None:
         network = Prompt.ask("Network", default=DEFAULT_NETWORK, console=console)
     if network not in {"user", "vmnet-shared"}:
@@ -425,7 +435,6 @@ def cmd_create(
         disk=f"vms/{name}/disk.qcow2",
         iso=f"isos/{iso}",
         installed=False,
-        accelerator=accel,
         display=display,
         serial=serial or "",
         network=NetworkConfig(type=network, ssh_port=ssh_port),
