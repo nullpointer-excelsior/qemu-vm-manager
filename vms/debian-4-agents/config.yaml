@@ -1,0 +1,19 @@
+name: debian-4-agents
+ram: 4G
+cores: 4
+disk_size: 20G
+disk: vms/debian-4-agents/disk.qcow2
+iso: isos/debian-13.3.0-arm64-netinst.iso
+installed: true
+display: default
+serial: GQ1W7LL7XQ
+network:
+  type: nat 
+audio:
+  enabled: true
+  backend: coreaudio
+shared_folders:
+  - host_path: /Users/usuario/Workspaces/virtual-machines/vms/debian-4-agents/setup
+    mount_tag: setup
+  - host_path: /Users/usuario/Workspaces/virtual-machines/vms/debian-4-agents/shared
+    mount_tag: shared
