@@ -1,121 +1,133 @@
 # virtual-machines
 
-Gestor de máquinas virtuales QEMU para Macs con Apple Silicon (aarch64, aceleración HVF).
+QEMU virtual machine manager for Apple Silicon Macs, using aarch64 architecture and
+HVF acceleration.
 
-## Requisitos
+## Requirements
 
-- macOS con Apple Silicon
+- macOS on Apple Silicon
 - [Homebrew](https://brew.sh/)
 - QEMU: `brew install qemu`
 - [uv](https://docs.astral.sh/uv/): `brew install uv`
 
-`vmctl.py` resuelve automáticamente sus dependencias (`typer`, `rich`, `pyyaml`) con
+QEMU must provide the `edk2-aarch64-code.fd` firmware. By default, `vmctl.py` looks for
+it at `/opt/homebrew/share/qemu/edk2-aarch64-code.fd`. Override this location with the
+`VMCTL_EFI_SOURCE` environment variable.
+
+The Python dependencies (`typer`, `rich`, and `pyyaml`) are resolved automatically by
 `uv run`.
 
-## Estructura
+## Structure
 
-```
-vmctl.py              # CLI principal
-.vmctl/config.yml     # Opciones por defecto de QEMU
-isos/                 # ISOs de instalación (gitignored)
+```text
+vmctl.py                  # Main CLI
+.vmctl/config.yml         # QEMU configuration templates
+isos/                     # Installation ISOs (not versioned)
 vms/<name>/
-  config.yaml         # Configuración de la VM
-  disk.qcow2          # Disco de la VM (gitignored)
-  firmware.fd         # NVRAM EFI (gitignored)
+  config.yaml             # VM configuration
+  disk.qcow2              # Virtual disk (not versioned)
+  firmware.fd             # EFI NVRAM (not versioned)
+examples/                 # Legacy reference scripts
 ```
 
-## Uso
+## Usage
 
 ```bash
 ./vmctl.py --help
-./vmctl.py create <nombre>
-./vmctl.py run [<nombre>]
+./vmctl.py --version
+./vmctl.py create <name>
+./vmctl.py run [<name>]
 ```
 
-Ejecuta el script directamente o con `uv run vmctl.py`; no uses `python3 vmctl.py` salvo
-que las dependencias ya estén instaladas.
+You can also run the CLI with `uv run vmctl.py`. Do not use `python3 vmctl.py` unless
+the dependencies are already installed in the active environment.
 
-### Crear una VM
+### Create a VM
+
+Place an installation ISO in `isos/`, then run:
 
 ```bash
 ./vmctl.py create debian
 ```
 
-El comando solicita ISO, RAM, cores, disco, tipo de red, pantalla y audio. También acepta
-`--iso`, `--ram`, `--cores`, `--disk-size`, `--network` y `--display`.
+The command prompts for the ISO, RAM, CPU cores, disk size, network, display, audio,
+and serial number. These options can also be provided on the command line:
 
-### Arrancar una VM
+```bash
+./vmctl.py create debian \
+  --iso debian-13.3.0-arm64-netinst.iso \
+  --ram 4G --cores 4 --disk-size 20G \
+  --network nat --display default
+```
+
+### Run a VM
 
 ```bash
 ./vmctl.py run debian
 ```
 
-Si `installed: false`, arranca desde el ISO. Después de confirmar la instalación,
-`vmctl.py` cambia automáticamente el valor a `installed: true`.
+Without a name, `run` displays an interactive VM selection. If `installed: false` is
+set in `vms/<name>/config.yaml`, the VM boots from the ISO. After you confirm that the
+installation is complete, `vmctl.py` automatically changes the value to `true` for
+future boots.
 
-## Red
+## Networking
 
-`vms/<nombre>/config.yaml` solo selecciona el tipo de red. Los argumentos de QEMU se
-definen centralmente en `.vmctl/config.yml`:
-
-```yaml
-template-options:
-  network:
-    - bridge: "-netdev vmnet-bridged,id=net0,ifname=en0 -device virtio-net-pci,netdev=net0"
-    - nat: "-netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=net0"
-```
-
-La VM selecciona una opción:
+Network types are defined in `.vmctl/config.yml`, and each VM selects one in its
+configuration:
 
 ```yaml
 network:
   type: nat
 ```
 
-### `nat`
+### NAT
 
-Usa la red `user` de QEMU con NAT. La VM tiene salida a Internet, pero no es visible
-directamente en la red local. El puerto `2222` del host se reenvía al SSH de la VM:
-
-```bash
-ssh -p 2222 usuario@localhost
-```
-
-El puerto se cambia editando `hostfwd` en `.vmctl/config.yml`.
-
-### `bridge`
-
-Usa `vmnet-bridged` y conecta la VM a una interfaz física del host. La VM obtiene su
-propia IP en la red local y se accede directamente:
+The `nat` mode provides Internet access through QEMU's `user` network and forwards host
+port `2222` to the VM's SSH port:
 
 ```bash
-ssh usuario@<IP_DE_LA_VM>
+ssh -p 2222 user@localhost
 ```
 
-`ifname=en0` normalmente corresponde a Wi-Fi. Consulta las interfaces disponibles con:
+Change the forwarded port by editing the `hostfwd` value in `.vmctl/config.yml`.
+
+### Bridge
+
+The `bridge` mode connects the VM to a physical network interface and gives it an IP on
+the local network:
+
+```bash
+ssh user@<VM_IP>
+```
+
+The default interface is `en0`. List available interfaces with:
 
 ```bash
 networksetup -listallhardwareports
 ```
 
-Si la interfaz activa es diferente, cambia `ifname=en0` en `.vmctl/config.yml`. El modo
-bridge no usa `hostfwd`.
+If necessary, change `ifname` in `.vmctl/config.yml`. Bridge mode does not use
+`hostfwd`.
 
-## Carpetas compartidas
+## Shared folders
+
+Add, list, or remove shared folders using virtio-9p:
 
 ```bash
-./vmctl.py share add /ruta/en/el/host hostshare --vm debian
+./vmctl.py share add /path/on/host hostshare --vm debian
 ./vmctl.py share list --vm debian
 ./vmctl.py share remove hostshare --vm debian
 ```
 
-Dentro de la VM:
+Inside the VM, mount a configured folder with:
 
 ```bash
+sudo mkdir -p /mnt/hostshare
 sudo mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/hostshare
 ```
 
-## Scripts legacy
+## Reference scripts
 
-`install-iso.sh`, `run-debian.sh` e `install-debian-base.sh` son scripts antiguos y se
-mantienen solo como referencia. Los nuevos flujos deben usar `vmctl.py`.
+The scripts in `examples/` belong to the previous workflow and are kept for reference
+only. New VM workflows should use `vmctl.py`.
