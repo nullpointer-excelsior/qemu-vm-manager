@@ -87,7 +87,7 @@ The `nat` mode provides Internet access through QEMU's `user` network and forwar
 port `2222` to the VM's SSH port:
 
 ```bash
-ssh -p 2222 user@localhost
+TERM=xterm-256color ssh -p 2222 user@localhost
 ```
 
 Change the forwarded port by editing the `hostfwd` value in `.vmctl/config.yml`.
@@ -98,7 +98,7 @@ The `bridge` mode connects the VM to a physical network interface and gives it a
 the local network:
 
 ```bash
-ssh user@<VM_IP>
+TERM=xterm-256color ssh user@<VM_IP>
 ```
 
 The default interface is `en0`. List available interfaces with:

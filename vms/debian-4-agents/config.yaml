@@ -13,7 +13,7 @@ audio:
   enabled: true
   backend: coreaudio
 shared_folders:
-  - host_path: /Users/usuario/Workspaces/virtual-machines/vms/debian-4-agents/setup
+  - host_path: /Users/usuario/Personal/Repositories/virtual-machines/vms/debian-4-agents/setup
     mount_tag: setup
-  - host_path: /Users/usuario/Workspaces/virtual-machines/vms/debian-4-agents/shared
+  - host_path: /Users/usuario/Personal/Repositories/virtual-machines/vms/debian-4-agents/shared
     mount_tag: shared
